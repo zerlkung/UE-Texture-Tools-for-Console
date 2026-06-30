@@ -6,6 +6,12 @@ from directx.dds import DDSHeader, DDS
 from directx.dxgi_format import DXGI_FORMAT, DXGI_BYTE_PER_PIXEL
 from .archive import (ArchiveBase, Bytes, Uint64, Uint32, String, StructArray)
 
+try:
+    from console_swizzler import unswizzle_ps5, swizzle_ps5
+    HAS_PS5_SWIZZLE = True
+except ImportError:
+    HAS_PS5_SWIZZLE = False
+
 # Defined in UnrealEngine/Engine/Source/Runtime/D3D12RHI/Private/D3D12RHI.cpp
 PF_TO_DXGI = {
     "PF_DXT1": DXGI_FORMAT.BC1_UNORM,
@@ -343,6 +349,8 @@ class Utexture:
 
         # Only update mips that exist in both DDS and original asset
         mips_to_update = min(len(dds_mips), old_mip_count)
+        block_w = self.get_block_size()
+        block_h = block_w if not self.is_compressed() else block_w
 
         offset = 0
         slice_bin = dds.slice_bin_list[0]  # Use first slice for 2D textures
@@ -352,6 +360,12 @@ class Utexture:
             bin_size = int(w * h * self.byte_per_pixel)
             data = slice_bin[offset: offset + bin_size]
             offset += bin_size
+
+            # Swizzle linear data to PS5 tiled format for inject
+            try:
+                data = swizzle_ps5(data, w, h, block_w, block_h, self.byte_per_pixel)
+            except Exception:
+                pass
 
             mip = self.mipmaps[i]
             mip.data = data
@@ -409,12 +423,24 @@ class Utexture:
 
         # mip list to slice list
         mipmap_size_list = [[m.width, m.height] for m in valid_mips]
+        is_ps5 = HAS_PS5_SWIZZLE and any(getattr(m, '_ps5_fields', {}).get('type') in (1, 2) for m in self.mipmaps)
+        block_w = self.get_block_size()
+        block_h = self.get_block_size() if not self.is_compressed() else block_w
+
         slice_bin_list = []
         for i in range(self.num_slices):
             data = b""
             for mip, size in zip(valid_mips, bin_sizes):
                 offset = size * i
-                data = b"".join([data, mip.data[offset: offset + size]])
+                mip_data = mip.data[offset: offset + size]
+                # Unswizzle PS5 tiled data for DDS export
+                if is_ps5 and mip.width > 0 and mip.height > 0:
+                    try:
+                        mip_data = unswizzle_ps5(mip_data, mip.width, mip.height,
+                                                block_w, block_h, self.byte_per_pixel)
+                    except Exception:
+                        pass  # Data might already be linear or wrong size
+                data = b"".join([data, mip_data])
             slice_bin_list.append(data)
 
         return DDS(header, slice_bin_list, mipmap_size_list)
