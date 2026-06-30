@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+*.pyo
+*.swizzled.dds
+*.unswizzled.dds
+*.swz.dds
+*.unswz.dds
+python/
+GUI.exe
+gui_definition.json
+gui_config.json
+exported/
+injected/
+swizzled/
+converted/
