@@ -235,8 +235,19 @@ class Utexture:
                     mip.data_resource.offset = uptnl_offset
                     uptnl_offset += mip.get_data_size()
 
-        # read mipmaps
-        ar << (StructArray, self, "mipmaps", Umipmap, self.mip_count, uasset_size, self.uasset.data_resources)
+        # read mipmaps — detect PS5 format by peeking at first bytes
+        if ar.is_reading:
+            peek_pos = ar.tell()
+            peek_val = Uint32.read(ar)
+            ar.seek(peek_pos)
+            self.is_ps5_mips = (peek_val in (1, 2))
+        else:
+            self.is_ps5_mips = any(getattr(m, '_ps5_fields', {}).get('type') in (1, 2) for m in self.mipmaps)
+
+        ps5_flag = bool(self.is_ps5_mips) if ar.is_reading else bool(
+            any(getattr(m, '_ps5_fields', {}).get('type') in (1, 2) for m in self.mipmaps)
+        )
+        ar << (StructArray, self, "mipmaps", Umipmap, self.mip_count, uasset_size, self.uasset.data_resources, ps5_flag)
 
         if ar.is_reading:
             _, ubulk_map_num, uptnl_map_num = self.get_mipmap_num()

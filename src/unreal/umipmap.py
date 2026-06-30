@@ -1,6 +1,7 @@
 """Mipmap class for texture asset with PS5 format support"""
 from .archive import (ArchiveBase, Int32, Uint32, Uint16, Buffer,
                       SerializableBase)
+from .data_resource import LegacyDataResource
 
 
 class PS5DataResource:
@@ -56,10 +57,17 @@ class Umipmap(SerializableBase):
         self.data_resource.update(len(data), has_uexp_bulk)
 
     def serialize(self, ar: ArchiveBase):
+        is_ps5 = len(ar.args) > 2 and ar.args[2]
         if ar.is_reading:
-            self._serialize_read(ar)
+            if is_ps5:
+                self._serialize_read(ar)
+            else:
+                self._serialize_read_standard(ar)
         else:
-            self._serialize_write(ar)
+            if is_ps5:
+                self._serialize_write(ar)
+            else:
+                self._serialize_write_standard(ar)
 
     def _serialize_read(self, ar: ArchiveBase):
         mip_type = Uint32.read(ar)
@@ -148,7 +156,64 @@ class Umipmap(SerializableBase):
             for _ in range(8):
                 Uint32.write(ar, 0)
 
-    def serialize_ubulk(self, ubulk_ar, uptnl_ar):
+    def _serialize_read_standard(self, ar: ArchiveBase):
+        """Standard UE format (LegacyDataResource)."""
+        offset = ar.args[0]
+        data_resources = ar.args[1]
+
+        if ar.version <= "4.27":
+            bCooked = Uint32.read(ar)
+            if bCooked != 1:
+                print(f"offset: {ar.tell() - 4}")
+                print(f"expected: 1")
+                print(f"actual: {bCooked}")
+                ar.raise_error("Unexpected value for bCooked.")
+
+        if ar.version <= "5.1":
+            self.data_resource = LegacyDataResource()
+            ar << (LegacyDataResource, self, "data_resource", offset)
+        else:
+            if ar.is_writing:
+                self.data_resource_id = len(data_resources)
+                data_resources.append(self.data_resource)
+            ar << (Int32, self, "data_resource_id")
+            if ar.is_reading:
+                self.data_resource = data_resources[self.data_resource_id]
+
+        if self.has_uexp_bulk():
+            ar << (Buffer, self, "data", self.data_resource.data_size)
+
+        int_type = Uint16 if ar.version == "borderlands3" else Uint32
+        ar << (int_type, self, "width")
+        ar << (int_type, self, "height")
+        if ar.version >= "4.20":
+            ar << (int_type, self, "depth")
+        self.pixel_num = self.width * self.height * self.depth
+        self.has_data = True
+
+    def _serialize_write_standard(self, ar: ArchiveBase):
+        offset = ar.args[0]
+        data_resources = ar.args[1]
+
+        if ar.version <= "4.27":
+            Uint32.write(ar, 1)  # bCooked
+
+        if ar.version <= "5.1":
+            ar << (LegacyDataResource, self, "data_resource", offset)
+        else:
+            if ar.is_writing:
+                self.data_resource_id = len(data_resources)
+                data_resources.append(self.data_resource)
+            ar << (Int32, self, "data_resource_id")
+
+        if self.has_uexp_bulk():
+            ar << (Buffer, self, "data", self.data_resource.data_size)
+
+        int_type = Uint16 if ar.version == "borderlands3" else Uint32
+        ar << (int_type, self, "width")
+        ar << (int_type, self, "height")
+        if ar.version >= "4.20":
+            ar << (int_type, self, "depth")
         if not getattr(self, 'has_data', True):
             return
         if self.data_resource.data_size <= 0:
@@ -169,21 +234,45 @@ class Umipmap(SerializableBase):
             print(pad + f"depth: {self.depth}")
 
     def has_uexp_bulk(self):
+        if self.data_resource:
+            return self.data_resource.has_uexp_bulk()
         return False
 
     def has_no_bulk(self):
+        if self.data_resource:
+            return self.data_resource.has_no_bulk()
         return False
 
     def has_ubulk_bulk(self):
+        if self.data_resource:
+            return self.data_resource.has_ubulk_bulk()
         return getattr(self, 'has_data', True) and self.data_resource and self.data_resource.data_size > 0
 
     def has_uptnl_bulk(self):
+        if self.data_resource:
+            return self.data_resource.has_uptnl_bulk()
         return False
 
     def has_wrong_offset(self):
+        if self.data_resource:
+            return self.data_resource.has_wrong_offset
         return False
 
     def get_data_size(self):
         if self.data_resource:
             return self.data_resource.data_size
         return 0
+
+    def serialize_ubulk(self, ubulk_ar, uptnl_ar):
+        if not getattr(self, 'has_data', True):
+            return
+        if self.data_resource is None or self.data_resource.data_size <= 0:
+            return
+        if self.has_uptnl_bulk():
+            uptnl_ar << (Buffer, self, "data", self.data_resource.data_size)
+        elif self.has_ubulk_bulk():
+            ubulk_ar << (Buffer, self, "data", self.data_resource.data_size)
+
+    def rewrite_offset(self, ar, new_offset):
+        if self.data_resource:
+            self.data_resource.rewrite_offset(ar, new_offset)
