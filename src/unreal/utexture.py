@@ -333,6 +333,46 @@ class Utexture:
         print("mipmaps have been removed.")
         print(f"  mipmap: {old_mipmap_num} -> 1")
 
+    def _inject_ps5(self, dds: DDS, new_depth: int):
+        """Inject DDS into PS5-format asset, preserving original mip structure."""
+        old_first_mip = self.first_mip_to_serialize
+        old_mip_count = len(self.mipmaps)
+        old_imported_w = self.imported_width
+        old_imported_h = self.imported_height
+        dds_mips = dds.mipmap_size_list
+
+        # Only update mips that exist in both DDS and original asset
+        mips_to_update = min(len(dds_mips), old_mip_count)
+
+        offset = 0
+        slice_bin = dds.slice_bin_list[0]  # Use first slice for 2D textures
+        for i in range(mips_to_update):
+            size = dds_mips[i] if i < len(dds_mips) else dds_mips[-1]
+            w, h = size[0], size[1]
+            bin_size = int(w * h * self.byte_per_pixel)
+            data = slice_bin[offset: offset + bin_size]
+            offset += bin_size
+
+            mip = self.mipmaps[i]
+            mip.data = data
+            mip.width = w
+            mip.height = h
+            mip.pixel_num = w * h
+            if mip.data_resource:
+                mip.data_resource.data_size = len(data)
+
+        # Preserve original PS5 metadata
+        self.first_mip_to_serialize = old_first_mip
+        self.imported_width = old_imported_w
+        self.imported_height = old_imported_h
+        self.mip_count = old_mip_count  # Keep original mip count
+
+        # Print results
+        print("Injected PS5 texture (original structure preserved):")
+        print(f"  First mip to serialize: {self.first_mip_to_serialize}")
+        print(f"  Mip count: {self.mip_count}")
+        print(f"  Updated {mips_to_update} mip(s) out of {old_mip_count}")
+
     def get_dds(self) -> DDS:
         """Get texture as dds."""
         if not self.has_supported_format():
@@ -411,42 +451,38 @@ class Utexture:
 
         # inject
         is_ps5_format = any(getattr(m, '_ps5_fields', {}).get('type') in (1, 2) for m in self.mipmaps)
-        uexp_width, uexp_height = self.get_max_uexp_size()
-        self.first_mip_to_serialize = 0
-        self.mipmaps = [Umipmap() for i in range(len(dds.mipmap_size_list))]
-        offset = 0
-        for size, mip, i in zip(dds.mipmap_size_list, self.mipmaps, range(len(self.mipmaps))):
-            mip.init_data_resource(self.uasset)
-            # get a mip data from slices
-            data = b""
-            bin_size = int(size[0] * size[1] * self.byte_per_pixel)
-            for slice_bin in dds.slice_bin_list:
-                data = b"".join([data, slice_bin[offset: offset + bin_size]])
-            offset += bin_size
-            if self.has_ubulk and i + 1 < len(self.mipmaps) and size[0] * size[1] > uexp_width * uexp_height:
-                mip.update(data, size, new_depth, False)
-            else:
-                mip.update(data, size, new_depth, True)
-            # Set PS5 format fields for write-back
-            if is_ps5_format:
-                if i == 0:
-                    mip._ps5_fields = {'type': 2, 'f1': 11, 'f2': 1, 'tag': 0x10501,
-                                       'data_size': bin_size, 'data_size2': bin_size,
-                                       'f6': 0, 'f7': 0}
-                else:
-                    mip._ps5_fields = {'type': 1, 'f1': 1, 'tag': 0x10501,
-                                       'data_size': bin_size, 'data_size2': bin_size,
-                                       'offset_or_flag': 0, 'f6': 0}
 
-        # print results
-        new_size = self.get_max_size()
-        self.imported_width, self.imported_height = new_size
-        _, ubulk_map_num, uptnl_map_num = self.get_mipmap_num()
-        self.has_ubulk = ubulk_map_num > 0
-        self.has_uptnl = uptnl_map_num > 0
-        self.mip_count = len(self.mipmaps)
-        if self.version == "ff7r":
-            self.has_opt_data = self.has_ubulk
+        if is_ps5_format:
+            # PS5 format: preserve original mip structure, only update pixel data
+            self._inject_ps5(dds, new_depth)
+            new_size = self.get_max_size()
+        else:
+            # Standard format: replace all mips
+            uexp_width, uexp_height = self.get_max_uexp_size()
+            self.first_mip_to_serialize = 0
+            old_mips = self.mipmaps
+            self.mipmaps = [Umipmap() for i in range(len(dds.mipmap_size_list))]
+            offset = 0
+            for size, mip, i in zip(dds.mipmap_size_list, self.mipmaps, range(len(self.mipmaps))):
+                mip.init_data_resource(self.uasset)
+                data = b""
+                bin_size = int(size[0] * size[1] * self.byte_per_pixel)
+                for slice_bin in dds.slice_bin_list:
+                    data = b"".join([data, slice_bin[offset: offset + bin_size]])
+                offset += bin_size
+                if self.has_ubulk and i + 1 < len(self.mipmaps) and size[0] * size[1] > uexp_width * uexp_height:
+                    mip.update(data, size, new_depth, False)
+                else:
+                    mip.update(data, size, new_depth, True)
+
+            new_size = self.get_max_size()
+            self.imported_width, self.imported_height = new_size
+            _, ubulk_map_num, uptnl_map_num = self.get_mipmap_num()
+            self.has_ubulk = ubulk_map_num > 0
+            self.has_uptnl = uptnl_map_num > 0
+            self.mip_count = len(self.mipmaps)
+            if self.version == "ff7r":
+                self.has_opt_data = self.has_ubulk
         new_mipmap_num = len(self.mipmaps)
         print("DDS has been injected.")
         print(f"  size: {old_size} -> {new_size}")
